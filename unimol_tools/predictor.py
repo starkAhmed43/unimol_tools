@@ -90,7 +90,7 @@ class UniMolRepr(object):
         }
         logger.info(f"UniMolRepr initialized with params: {self.params}")
 
-    def get_repr(self, data=None, return_atomic_reprs=False):
+    def get_repr(self, data=None, return_atomic_reprs=False, return_tensor=False):
         """
         Get molecular representation by unimol.
 
@@ -146,10 +146,12 @@ class UniMolRepr(object):
         self.trainer = Trainer(task='repr', **self.params)
         logger.info("Starting model inference.")
         repr_output = self.trainer.inference(
-            self.model,
+            model=self.model,
+            dataset=dataset,
+            model_name=self.params['model_name'],
             return_repr=True,
             return_atomic_reprs=return_atomic_reprs,
-            dataset=dataset,
+            return_tensor=return_tensor,
         )
         logger.info("Inference completed.")
         return repr_output
