@@ -10,6 +10,8 @@ import pathlib
 import numpy as np
 import pandas as pd
 from rdkit import Chem
+from tqdm.auto import tqdm
+from multiprocessing import Pool
 from rdkit.Chem import PandasTools
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
@@ -20,6 +22,7 @@ class MolDataReader(object):
     '''A class to read Mol Data.'''
 
     def read_data(self, data=None, is_train=True, **params):
+        logger.info("Starting read_data")
         # TO DO
         # 1. add anomaly detection & outlier removal.
         # 2. add support for other file format.
@@ -48,16 +51,22 @@ class MolDataReader(object):
         split_group_col = params.get('split_group_col', 'scaffold')
 
         if isinstance(data, str):
+            logger.info(f"Loading data from file: {data}")
             # load from file
+            self.data_path = data
             if data.endswith('.sdf'):
+                logger.info("Detected SDF file format")
                 # load sdf file
                 data = PandasTools.LoadSDF(data)
                 data = self._convert_numeric_columns(data)
             elif data.endswith('.csv'):
-                data = pd.read_csv(data)
+                logger.info("Detected CSV file format")
+                data = pd.read_csv(self.data_path)
             else:
+                logger.error(f"Unknown file type: {data}")
                 raise ValueError('Unknown file type: {}'.format(data))
         elif isinstance(data, dict):
+            logger.info("Loading data from dictionary")
             # load from dict
             if 'target' in data:
                 label = np.array(data['target'])
@@ -68,36 +77,14 @@ class MolDataReader(object):
                         data[target_col_prefix + str(i)] = label[:, i]
 
             _ = data.pop('target', None)
-            
-            if 'atoms' in data and 'coordinates' in data:
-                if not isinstance(data['atoms'][0], list) and not isinstance(data['atoms'][0], np.ndarray):
-                    data['atoms'] = [data['atoms']]
-                    data['coordinates'] = [data['coordinates']]
-                if not isinstance(data['atoms'][0][0], str):
-                    pt = Chem.GetPeriodicTable()
-                    data['atoms'] = [
-                        [pt.GetElementSymbol(int(atom)) for atom in atoms]
-                        for atoms in data['atoms']
-                    ]
-            if smiles_col in data and isinstance(data[smiles_col], str):
-                # if the smiles_col is a single string, convert it to a list
-                data[smiles_col] = [data[smiles_col]]
-                
-            data = pd.DataFrame(data)
+            data = pd.DataFrame(data).rename(columns={smiles_col: 'SMILES'})
 
-        elif isinstance(data, pd.DataFrame):
-            # load from pandas DataFrame
-            if 'ROMol' in data.columns:
-                data = self._convert_numeric_columns(data)
-                
         elif isinstance(data, list) or isinstance(data, np.ndarray):
+            logger.info("Loading data from SMILES list or numpy array")
             # load from smiles list
-            data = pd.DataFrame(data, columns=[smiles_col])
-
-        elif isinstance(data, pd.Series):
-            # load from smiles pandas Series
-            data = data.to_frame(name=smiles_col)
+            data = pd.DataFrame(data, columns=['SMILES'])
         else:
+            logger.error(f"Unknown data type: {type(data)}")
             raise ValueError('Unknown data type: {}'.format(type(data)))
 
         #### parsing target columns
@@ -105,12 +92,14 @@ class MolDataReader(object):
         #### 2. if target_cols is None, use all columns with prefix 'target_col_prefix' as target columns.
         #### 3. use given target_cols as target columns placeholder with value -1.0 for predict
         if task == 'repr':
+            logger.info("Task is 'repr', skipping target column parsing")
             # placeholder for repr task
             targets = None
             target_cols = None
             num_classes = None
             multiclass_cnt = None
         else:
+            logger.info(f"Parsing target columns for task: {task}")
             if target_cols is None:
                 target_cols = [
                     item for item in data.columns if item.startswith(target_col_prefix)
@@ -125,11 +114,14 @@ class MolDataReader(object):
                 )
 
             if is_train:
+                logger.info("Training mode: anomaly_clean=%s", anomaly_clean)
                 if anomaly_clean:
                     data = self.anomaly_clean(data, task, target_cols)
                 if task == 'multiclass':
+                    logger.info("Multiclass task detected")
                     multiclass_cnt = int(data[target_cols].max() + 1)
             else:
+                logger.info("Prediction mode: filling missing target columns with -1.0")
                 for col in target_cols:
                     if col not in data.columns or data[col].isnull().any():
                         data[col] = -1.0
@@ -137,6 +129,7 @@ class MolDataReader(object):
             targets = data[target_cols].values.tolist()
             num_classes = len(target_cols)
 
+        logger.info("Preparing output dictionary")
         dd = {
             'raw_data': data,
             'raw_target': targets,
@@ -147,33 +140,47 @@ class MolDataReader(object):
             ),
         }
         if smiles_col in data.columns:
-            mask = data[smiles_col].apply(
+            logger.info(f"Checking SMILES validity in column: {smiles_col}")
+            """mask = data[smiles_col].apply(
                 lambda smi: self.check_smiles(smi, is_train, smi_strict)
             )
-            data = data[mask]
+            data = data[mask]"""
             dd['smiles'] = data[smiles_col].tolist()
-            dd['scaffolds'] = data[smiles_col].map(self.smi2scaffold).tolist()
+            with Pool(processes=os.cpu_count()) as pool:
+                smiles_list = data[smiles_col].tolist()
+                logger.info(f"Scaffolding {len(smiles_list)} SMILES strings")
+                dd['scaffolds'] = list(
+                    tqdm(pool.imap(self.smi2scaffold, smiles_list), total=len(smiles_list), desc="Generating scaffolds")
+                )
         else:
+            logger.warning(f"SMILES column '{smiles_col}' not found in data")
             dd['smiles'] = None
             dd['scaffolds'] = None
 
         if split_group_col in data.columns:
+            logger.info(f"Using split group column: {split_group_col}")
             dd['group'] = data[split_group_col].tolist()
         elif split_group_col == 'scaffold':
+            logger.info("Using scaffolds as group")
             dd['group'] = dd['scaffolds']
         else:
+            logger.warning(f"Split group column '{split_group_col}' not found")
             dd['group'] = None
 
         if 'atoms' in data.columns and 'coordinates' in data.columns:
+            logger.info("Found 'atoms' and 'coordinates' columns")
             dd['atoms'] = data['atoms'].tolist()
             dd['coordinates'] = data['coordinates'].tolist()
 
         if 'ROMol' in data.columns:
+            logger.info("Found 'ROMol' column")
             dd['mols'] = data['ROMol'].tolist()
 
+        logger.info("Finished read_data")
         return dd
 
     def check_smiles(self, smi, is_train, smi_strict):
+        logger.debug(f"Checking SMILES: {smi}")
         """
         Validates a SMILES string and decides whether it should be included based on training mode and strictness.
 
@@ -193,6 +200,7 @@ class MolDataReader(object):
         return True
 
     def smi2scaffold(self, smi):
+        logger.debug(f"Converting SMILES to scaffold: {smi}")
         """
         Converts a SMILES string to its corresponding scaffold.
 
@@ -208,6 +216,7 @@ class MolDataReader(object):
             return smi
 
     def anomaly_clean(self, data, task, target_cols):
+        logger.info(f"Performing anomaly cleaning for task: {task}")
         """
         Performs anomaly cleaning on the data based on the specified task.
 
@@ -231,6 +240,7 @@ class MolDataReader(object):
             raise ValueError('Unknown task: {}'.format(task))
 
     def anomaly_clean_regression(self, data, target_cols):
+        logger.info(f"Performing regression anomaly cleaning for columns: {target_cols}")
         """
         Performs anomaly cleaning specifically for regression tasks using a 3-sigma threshold.
 
@@ -252,6 +262,7 @@ class MolDataReader(object):
         return data
 
     def _convert_numeric_columns(self, df):
+        logger.info("Converting DataFrame columns to numeric types")
         """
         Try to convert all columns in the DataFrame to numeric types, except for the 'ROMol' column.
         

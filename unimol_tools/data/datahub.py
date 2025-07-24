@@ -6,7 +6,6 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import numpy as np
-import pandas as pd
 from rdkit.Chem import PandasTools
 
 from ..utils import logger
@@ -32,11 +31,12 @@ class DataHub(object):
         :param save_path: (str) Path to save any necessary files, like scalers.
         :param params: Additional parameters for data preprocessing and model configuration.
         """
+        logger.info(f"Initializing DataHub with is_train={is_train}, save_path={save_path}, task={params.get('task', None)}")
         self.raw_data = data
         self.is_train = is_train
         self.save_path = save_path
         self.task = params.get('task', None)
-        # self.target_cols = params.get('target_cols', None)
+        self.target_cols = params.get('target_cols', None)
         self.multiclass_cnt = params.get('multiclass_cnt', None)
         self.ss_method = params.get('target_normalize', 'none')
         self.conf_cache_level = params.get('conf_cache_level', 1)
@@ -44,47 +44,47 @@ class DataHub(object):
         self._init_split(**params)
 
     def _init_data(self, **params):
-        """
-        Initializes and preprocesses the data based on the task and parameters provided.
-
-        This method handles reading raw data, scaling targets, and transforming data for use with
-        molecular inputs. It tailors the preprocessing steps based on the task type, such as regression
-        or classification.
-
-        :param params: Additional parameters for data processing.
-        :raises ValueError: If the task type is unknown.
-        """
+        logger.info("Starting data initialization and preprocessing.")
         self.data = MolDataReader().read_data(self.raw_data, self.is_train, **params)
+        logger.info("Raw data read successfully.")
         self.data['target_scaler'] = TargetScaler(
             self.ss_method, self.task, self.save_path
         )
+        logger.info(f"TargetScaler initialized with method={self.ss_method}, task={self.task}.")
         if self.task == 'regression':
+            logger.info("Processing regression task targets.")
             target = np.array(self.data['raw_target']).reshape(-1, 1).astype(np.float32)
             if self.is_train:
+                logger.info("Fitting target scaler for regression.")
                 self.data['target_scaler'].fit(target, self.save_path)
                 self.data['target'] = self.data['target_scaler'].transform(target)
             else:
                 self.data['target'] = target
         elif self.task == 'classification':
+            logger.info("Processing classification task targets.")
             target = np.array(self.data['raw_target']).reshape(-1, 1).astype(np.int32)
             self.data['target'] = target
         elif self.task == 'multiclass':
+            logger.info("Processing multiclass task targets.")
             target = np.array(self.data['raw_target']).reshape(-1, 1).astype(np.int32)
             self.data['target'] = target
             if not self.is_train:
                 self.data['multiclass_cnt'] = self.multiclass_cnt
         elif self.task == 'multilabel_regression':
+            logger.info("Processing multilabel regression task targets.")
             target = (
                 np.array(self.data['raw_target'])
                 .reshape(-1, self.data['num_classes'])
                 .astype(np.float32)
             )
             if self.is_train:
+                logger.info("Fitting target scaler for multilabel regression.")
                 self.data['target_scaler'].fit(target, self.save_path)
                 self.data['target'] = self.data['target_scaler'].transform(target)
             else:
                 self.data['target'] = target
         elif self.task == 'multilabel_classification':
+            logger.info("Processing multilabel classification task targets.")
             target = (
                 np.array(self.data['raw_target'])
                 .reshape(-1, self.data['num_classes'])
@@ -92,42 +92,53 @@ class DataHub(object):
             )
             self.data['target'] = target
         elif self.task == 'repr':
+            logger.info("Processing representation task targets.")
             self.data['target'] = self.data['raw_target']
         else:
+            logger.error(f"Unknown task: {self.task}")
             raise ValueError('Unknown task: {}'.format(self.task))
 
+        logger.info(f"Model name: {params.get('model_name', None)}")
         if params.get('model_name', None) == 'unimolv1':
             if 'mols' in self.data:
+                logger.info("Transforming mols for unimolv1.")
                 no_h_list = ConformerGen(**params).transform_mols(self.data['mols'])
                 mols = None
             elif 'atoms' in self.data and 'coordinates' in self.data:
+                logger.info("Transforming raw atoms and coordinates for unimolv1.")
                 no_h_list = ConformerGen(**params).transform_raw(
                     self.data['atoms'], self.data['coordinates']
                 )
                 mols = None
             else:
+                logger.info("Transforming smiles for unimolv1.")
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = ConformerGen(**params).transform(smiles_list)
         elif params.get('model_name', None) == 'unimolv2':
             if 'mols' in self.data:
+                logger.info("Transforming mols for unimolv2.")
                 no_h_list = UniMolV2Feature(**params).transform_mols(self.data['mols'])
                 mols = None
             elif 'atoms' in self.data and 'coordinates' in self.data:
+                logger.info("Transforming raw atoms and coordinates for unimolv2.")
                 no_h_list = UniMolV2Feature(**params).transform_raw(
                     self.data['atoms'], self.data['coordinates']
                 )
                 mols = None
             else:
+                logger.info("Transforming smiles for unimolv2.")
                 smiles_list = self.data["smiles"]
                 no_h_list, mols = UniMolV2Feature(**params).transform(smiles_list)
 
         self.data['unimol_input'] = no_h_list
+        logger.info("Unimol input transformation complete.")
 
         if mols is not None:
+            logger.info("Saving mols to SDF.")
             self.save_mol2sdf(self.data['raw_data'], mols, params)
 
     def _init_split(self, **params):
-
+        logger.info("Initializing data split.")
         self.split_method = params.get('split_method', '5fold_random')
         kfold, method = (
             int(self.split_method.split('fold')[0]),
@@ -138,6 +149,7 @@ class DataHub(object):
         self.split_seed = params.get('split_seed', 42)
         self.data['kfold'] = self.kfold
         if not self.is_train:
+            logger.info("Not training mode, skipping split.")
             return
         self.splitter = Splitter(self.method, self.kfold, seed=self.split_seed)
         split_nfolds = self.splitter.split(**self.data)
@@ -149,32 +161,23 @@ class DataHub(object):
         for enu, (tr_idx, te_idx) in enumerate(split_nfolds):
             nfolds[te_idx] = enu
         self.data['split_nfolds'] = split_nfolds
+        logger.info("Data split initialization complete.")
         return split_nfolds
 
     def save_mol2sdf(self, data, mols, params):
-        """
-        Save the conformers to a SDF file.
-
-        :param data: DataFrame containing the raw data.
-        :param mols: List of RDKit molecule objects.
-        """
+        logger.info("Attempting to save conformers to SDF file.")
         if isinstance(self.raw_data, str):
             base_name = os.path.splitext(os.path.basename(self.raw_data))[0]
-        elif isinstance(self.raw_data, list) or isinstance(self.raw_data, np.ndarray) or isinstance(self.raw_data, pd.Series):
-            # If the raw_data is a list of smiles, we can use a default name.
+        elif isinstance(self.raw_data, list) or isinstance(self.raw_data, np.ndarray):
             base_name = 'unimol_conformers'
-        elif isinstance(self.raw_data, pd.DataFrame) or isinstance(self.raw_data, dict):
-            if self.is_train:
-                base_name = 'unimol_conformers_train'
-            else:
-                base_name = 'unimol_conformers'
         else:
-            logger.warning('Warning: raw_data is not a path or list of smiles, cannot save sdf.')
+            logger.warning('Warning: raw_data is not a path or list, cannot save sdf.')
             return
         if params.get('sdf_save_path') is None:
             if self.save_path is not None:
                 params['sdf_save_path'] = self.save_path
             else:
+                logger.warning("No save path provided for SDF file.")
                 return
         save_path = os.path.join(params.get('sdf_save_path'), f"{base_name}.sdf")
         if self.conf_cache_level == 0:

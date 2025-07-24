@@ -17,7 +17,7 @@ warnings.filterwarnings(action='ignore')
 from multiprocessing import Pool
 
 from numba import njit
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from ..config import MODEL_CONFIG
 from ..utils import logger
@@ -165,14 +165,17 @@ class ConformerGen(object):
 
     def transform(self, smiles_list):
         logger.info('Start generating conformers...')
+        smiles_list = sorted(smiles_list, key=len)  # Sort by length of SMILES
         if self.multi_process:
-            pool = Pool(processes=min(8, os.cpu_count()))
+            pool = Pool(processes=max(8, os.cpu_count()))
             results = [
-                item for item in tqdm(pool.imap(self.single_process, smiles_list))
+                item for item in tqdm(pool.imap_unordered(self.single_process, smiles_list),
+                                    total=len(smiles_list),
+                                    desc="Generating conformers")
             ]
             pool.close()
         else:
-            results = [self.single_process(smiles) for smiles in tqdm(smiles_list)]
+            results = [self.single_process(smiles) for smiles in tqdm(smiles_list, desc="Generating conformers")]
 
         inputs, mols = zip(*results)
         inputs = list(inputs)
@@ -436,13 +439,15 @@ class UniMolV2Feature(object):
     def transform(self, smiles_list):
         logger.info('Start generating conformers...')
         if self.multi_process:
-            pool = Pool(processes=min(8, os.cpu_count()))
+            pool = Pool(processes=max(8, os.cpu_count()))
             results = [
-                item for item in tqdm(pool.imap(self.single_process, smiles_list))
+                item for item in tqdm(pool.imap_unordered(self.single_process, smiles_list),
+                                    total=len(smiles_list),
+                                    desc="Generating conformers")
             ]
             pool.close()
         else:
-            results = [self.single_process(smiles) for smiles in tqdm(smiles_list)]
+            results = [self.single_process(smiles) for smiles in tqdm(smiles_list, desc="Generating conformers")]
 
         inputs, mols = zip(*results)
         inputs = list(inputs)
