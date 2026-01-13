@@ -62,6 +62,9 @@ class MolDataReader(object):
             elif data.endswith('.csv'):
                 logger.info("Detected CSV file format")
                 data = pd.read_csv(self.data_path)
+            elif data.endswith('.pdb'):
+                mol = Chem.MolFromPDBFile(data)
+                data = pd.DataFrame([mol], columns=['pdb_mol'])
             else:
                 logger.error(f"Unknown file type: {data}")
                 raise ValueError('Unknown file type: {}'.format(data))
@@ -77,8 +80,30 @@ class MolDataReader(object):
                         data[target_col_prefix + str(i)] = label[:, i]
 
             _ = data.pop('target', None)
-            data = pd.DataFrame(data).rename(columns={smiles_col: 'SMILES'})
+            
+            if 'atoms' in data and 'coordinates' in data:
+                if not isinstance(data['atoms'][0], list) and not isinstance(data['atoms'][0], np.ndarray):
+                    data['atoms'] = [data['atoms']]
+                    data['coordinates'] = [data['coordinates']]
+                if not isinstance(data['atoms'][0][0], str):
+                    pt = Chem.GetPeriodicTable()
+                    data['atoms'] = [
+                        [pt.GetElementSymbol(int(atom)) for atom in atoms]
+                        for atoms in data['atoms']
+                    ]
+            if smiles_col in data and isinstance(data[smiles_col], str):
+                # if the smiles_col is a single string, convert it to a list
+                data[smiles_col] = [data[smiles_col]]
+            if 'residue' in data:
+                data['residue'] = [data['residue']] # for pocket
+                
+            data = pd.DataFrame(data)
 
+        elif isinstance(data, pd.DataFrame):
+            # load from pandas DataFrame
+            if 'ROMol' in data.columns:
+                data = self._convert_numeric_columns(data)
+                
         elif isinstance(data, list) or isinstance(data, np.ndarray):
             logger.info("Loading data from SMILES list or numpy array")
             # load from smiles list
@@ -152,6 +177,9 @@ class MolDataReader(object):
                 dd['scaffolds'] = list(
                     tqdm(pool.imap(self.smi2scaffold, smiles_list), total=len(smiles_list), desc="Generating scaffolds")
                 )
+        elif 'ROMol' in data.columns:
+            dd['smiles'] = None
+            dd['scaffolds'] = data['ROMol'].apply(self.mol2scaffold).tolist()
         else:
             logger.warning(f"SMILES column '{smiles_col}' not found in data")
             dd['smiles'] = None
@@ -175,6 +203,8 @@ class MolDataReader(object):
         if 'ROMol' in data.columns:
             logger.info("Found 'ROMol' column")
             dd['mols'] = data['ROMol'].tolist()
+        elif 'pdb_mol' in data.columns:
+            dd['mols'] = data['pdb_mol'].tolist()
 
         logger.info("Finished read_data")
         return dd
@@ -214,6 +244,23 @@ class MolDataReader(object):
             )
         except:
             return smi
+
+    def mol2scaffold(self, mol):
+        """
+        Converts an RDKit molecule to its corresponding scaffold.
+
+        :param mol: (RDKit Mol) The molecule to convert.
+
+        :return: (str) The scaffold of the molecule, or the original SMILES if conversion fails.
+        """
+        if not isinstance(mol, Chem.Mol):
+            raise ValueError('Input must be an RDKit Mol object')
+        try:
+            return MurckoScaffold.MurckoScaffoldSmiles(
+                mol=mol, includeChirality=True
+            )
+        except:
+            return Chem.MolToSmiles(mol, includeChirality=True)
 
     def anomaly_clean(self, data, task, target_cols):
         logger.info(f"Performing anomaly cleaning for task: {task}")

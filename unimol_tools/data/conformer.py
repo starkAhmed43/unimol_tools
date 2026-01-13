@@ -16,12 +16,18 @@ RDLogger.DisableLog('rdApp.*')
 warnings.filterwarnings(action='ignore')
 from multiprocessing import Pool
 
-from numba import njit
+try:  # pragma: no cover - optional dependency
+    from numba import njit
+except ModuleNotFoundError:  # pragma: no cover - fallback stub
+    def njit(*args, **kwargs):
+        def wrap(fn):
+            return fn
+        return wrap
 from tqdm.auto import tqdm
 
 from ..config import MODEL_CONFIG
 from ..utils import logger
-from ..weights import WEIGHT_DIR, weight_download
+from ..weights import get_weight_dir, weight_download
 from .dictionary import Dictionary
 
 # https://github.com/snap-stanford/ogb/blob/master/ogb/utils/features.py
@@ -88,15 +94,24 @@ class ConformerGen(object):
         self.method = params.get('method', 'rdkit_random')
         self.mode = params.get('mode', 'fast')
         self.remove_hs = params.get('remove_hs', False)
-        if self.data_type == 'molecule':
-            name = "no_h" if self.remove_hs else "all_h"
-            name = self.data_type + '_' + name
-            self.dict_name = MODEL_CONFIG['dict'][name]
+        # allow using a custom token dictionary to avoid unnecessary downloads
+        dict_path = params.get('pretrained_dict_path', None)
+        if dict_path is not None:
+            # load dictionary from user-provided path
+            self.dictionary = Dictionary.load(dict_path)
         else:
-            self.dict_name = MODEL_CONFIG['dict'][self.data_type]
-        if not os.path.exists(os.path.join(WEIGHT_DIR, self.dict_name)):
-            weight_download(self.dict_name, WEIGHT_DIR)
-        self.dictionary = Dictionary.load(os.path.join(WEIGHT_DIR, self.dict_name))
+            if self.data_type == 'molecule':
+                name = "no_h" if self.remove_hs else "all_h"
+                name = self.data_type + '_' + name
+                self.dict_name = MODEL_CONFIG['dict'][name]
+            else:
+                self.dict_name = MODEL_CONFIG['dict'][self.data_type]
+            weight_dir = get_weight_dir()
+            if not os.path.exists(os.path.join(weight_dir, self.dict_name)):
+                weight_download(self.dict_name, weight_dir)
+            self.dictionary = Dictionary.load(
+                os.path.join(weight_dir, self.dict_name)
+            )
         self.dictionary.add_symbol("[MASK]", is_special=True)
         if os.name == 'posix':
             self.multi_process = params.get('multi_process', True)
@@ -125,6 +140,7 @@ class ConformerGen(object):
                 self.dictionary,
                 self.max_atoms,
                 remove_hs=self.remove_hs,
+                data_type=self.data_type,
             )
             return feat, mol
         else:
@@ -143,6 +159,7 @@ class ConformerGen(object):
                     self.dictionary,
                     self.max_atoms,
                     remove_hs=self.remove_hs,
+                    data_type=self.data_type,
                 )
             )
         return inputs
@@ -159,6 +176,7 @@ class ConformerGen(object):
                     self.dictionary,
                     self.max_atoms,
                     remove_hs=self.remove_hs,
+                    data_type=self.data_type,
                 )
             )
         return inputs
@@ -312,7 +330,7 @@ def inner_coords(atoms, coordinates, remove_hs=True):
 
 
 def coords2unimol(
-    atoms, coordinates, dictionary, max_atoms=256, remove_hs=True, **params
+    atoms, coordinates, dictionary, max_atoms=256, remove_hs=True, data_type='molecule', **params
 ):
     """
     Converts atom symbols and coordinates into a unified molecular representation.
@@ -335,9 +353,14 @@ def coords2unimol(
         atoms = atoms[idx]
         coordinates = coordinates[idx]
     # tokens padding
+    if data_type == 'pocket':
+        src_tokens_mid = [dictionary.index(atom[0]) for atom in atoms]
+    else:
+        src_tokens_mid = [dictionary.index(atom) for atom in atoms]
+
     src_tokens = np.array(
         [dictionary.bos()]
-        + [dictionary.index(atom) for atom in atoms]
+        + src_tokens_mid
         + [dictionary.eos()]
     )
     src_distance = np.zeros((len(src_tokens), len(src_tokens)))

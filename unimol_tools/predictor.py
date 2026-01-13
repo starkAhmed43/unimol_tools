@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+from omegaconf import DictConfig, OmegaConf
 
 from .utils import logger
 from .data import DataHub
@@ -38,6 +39,7 @@ class UniMolRepr(object):
 
     def __init__(
         self,
+        cfg: DictConfig | None = None,
         data_type='molecule',
         batch_size=32,
         remove_hs=False,
@@ -47,12 +49,15 @@ class UniMolRepr(object):
         use_ddp=False,
         use_gpu='all',
         save_path=None,
+        pretrained_model_path=None,
+        pretrained_dict_path=None,
+        max_atoms=256,
         **kwargs,
     ):
         """
         Initialize a :class:`UniMolRepr` class.
 
-        :param data_type: str, default='molecule', currently support molecule, oled.
+        :param data_type: str, default='molecule', currently support molecule, oled, pocket.
         :param batch_size: int, default=32, batch size for training.
         :param remove_hs: bool, default=False, whether to remove hydrogens in molecular.
         :param model_name: str, default='unimolv1', currently support unimolv1, unimolv2.
@@ -60,19 +65,50 @@ class UniMolRepr(object):
         :param use_cuda: bool, default=True, whether to use gpu.
         :param use_ddp: bool, default=False, whether to use distributed data parallel.
         :param use_gpu: str, default='all', which gpu to use.
+        :param save_path: str, default=None, path to save representation result.
+        :param pretrained_model_path: str, default=None, path to pretrained model.
+        :param pretrained_dict_path: str, default=None, path to pretrained model's dict file.
+        :param max_atoms: int, default=256, max atoms of molecular to be encode.
+        :param kwargs: other parameters.
         """
+        if cfg is not None:
+            cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+            data_type = cfg_dict.get('data_type', data_type)
+            batch_size = cfg_dict.get('batch_size', batch_size)
+            remove_hs = cfg_dict.get('remove_hs', remove_hs)
+            model_name = cfg_dict.get('model_name', model_name)
+            model_size = cfg_dict.get('model_size', model_size)
+            smiles_col = cfg_dict.get('smiles_col', smiles_col)
+            use_cuda = cfg_dict.get('use_cuda', use_cuda)
+            use_ddp = cfg_dict.get('use_ddp', use_ddp)
+            use_gpu = cfg_dict.get('use_gpu', use_gpu)
+            save_path = cfg_dict.get('save_path', save_path)
+            pretrained_model_path = cfg_dict.get(
+                'pretrained_model_path', pretrained_model_path
+            )
+            pretrained_dict_path = cfg_dict.get(
+                'pretrained_dict_path', pretrained_dict_path
+            )
+            max_atoms = cfg_dict.get('max_atoms', max_atoms)
+
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() and use_cuda else "cpu"
         )
         logger.info(f"Initializing UniMolRepr with model_name={model_name}, model_size={model_size}, device={self.device}")
         if model_name == 'unimolv1':
             self.model = UniMolModel(
-                output_dim=1, data_type=data_type, remove_hs=remove_hs
+                output_dim=1,
+                data_type=data_type,
+                remove_hs=remove_hs,
+                pretrained_model_path=pretrained_model_path,
+                pretrained_dict_path=pretrained_dict_path,
             ).to(self.device)
         elif model_name == 'unimolv2':
-            self.model = UniMolV2Model(output_dim=1, model_size=model_size).to(
-                self.device
-            )
+            self.model = UniMolV2Model(
+                output_dim=1,
+                model_size=model_size,
+                pretrained_model_path=pretrained_model_path,
+            ).to(self.device)
         else:
             logger.error(f"Unknown model name: {model_name}")
             raise ValueError('Unknown model name: {}'.format(model_name))
@@ -87,6 +123,9 @@ class UniMolRepr(object):
             'use_ddp': use_ddp,
             'use_gpu': use_gpu,
             'save_path': save_path,
+            'pretrained_model_path': pretrained_model_path,
+            'pretrained_dict_path': pretrained_dict_path,
+            'max_atoms': max_atoms,
         }
         logger.info(f"UniMolRepr initialized with params: {self.params}")
 
@@ -109,9 +148,8 @@ class UniMolRepr(object):
 
         logger.info(f"get_repr called with data type: {type(data)}")
         if isinstance(data, str):
-            if data.endswith('.sdf'):
-                logger.info("Input data is an SDF file.")
-                # Datahub will process sdf file.
+            if data.endswith('.sdf') or data.endswith('.csv') or data.endswith('.pdb'):
+                # Datahub will process sdf and csv file.
                 pass
             elif data.endswith('.csv'):
                 logger.info("Input data is a CSV file.")
@@ -129,8 +167,13 @@ class UniMolRepr(object):
         elif isinstance(data, list):
             logger.info("Input data is a list of SMILES strings.")
             # list of smiles strings.
-            assert isinstance(data[-1], str)
-            data = np.array(data)
+            assert isinstance(data[0], str)
+        elif isinstance(data, pd.DataFrame):
+            # pandas DataFrame of smiles strings.
+            if self.params['smiles_col'] not in data.columns:
+                assert ('atoms' in data.columns and 'coordinates' in data.columns) or 'ROMol' in data.columns
+            else:
+                assert isinstance(data[self.params['smiles_col']].iloc[0], str)
         else:
             logger.error(f"Unknown data type: {type(data)}")
             raise ValueError('Unknown data type: {}'.format(type(data)))

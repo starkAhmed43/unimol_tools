@@ -27,10 +27,14 @@ class Dictionary:
         self.count = []
         self.indices = {}
         self.specials = set()
-        self.specials.add(bos)
-        self.specials.add(unk)
-        self.specials.add(pad)
-        self.specials.add(eos)
+
+        # initialize dictionary with special tokens
+        for token in [bos, unk, pad, eos]:
+            self.add_symbol(token, is_special=True)
+
+        if extra_special_symbols is not None:
+            for token in extra_special_symbols:
+                self.add_symbol(token, is_special=True)
 
     def __eq__(self, other):
         return self.indices == other.indices
@@ -149,3 +153,11 @@ class Dictionary:
                 raise ValueError(
                     "Incorrect dictionary format, expected '<token> <cnt> [flags]'"
                 )
+    
+    @classmethod
+    def from_list(cls, symbol_list):
+        """Creates a Dictionary instance from a list of symbols."""
+        d = cls()
+        for sym in symbol_list:
+            d.add_symbol(sym)
+        return d
